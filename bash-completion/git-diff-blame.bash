@@ -1,13 +1,23 @@
 __GIT_DIFF_BLAME_PRINT_WARNING_ON_TOO_EARLY_OPTIONS="${__GIT_DIFF_BLAME_PRINT_WARNING_ON_TOO_EARLY_OPTIONS:-1}"
 __GIT_DIFF_BLAME_VERBOSE_FAILURES="${__GIT_DIFF_BLAME_VERBOSE_FAILURES:-0}"
+if ! declare -p __GIT_DIFF_BLAME_LAST_WORDS >& /dev/null; then
+  declare -a __GIT_DIFF_BLAME_LAST_WORDS=( '=zzz_should_never_match=' )
+fi
+# Protection against truly gargantuan command lines
+__GIT_DIFF_BLAME_MAX_ARGS_TO_COMPARE="${__GIT_DIFF_BLAME_MAX_ARGS_TO_COMPARE:-100}"
 
 __git_diff_blame_warnings_too_early_options () {
   [ "$__GIT_DIFF_BLAME_PRINT_WARNING_ON_TOO_EARLY_OPTIONS" == "true" ] || (( $__GIT_DIFF_BLAME_PRINT_WARNING_ON_TOO_EARLY_OPTIONS != 0 ))
 }
 
-
 __git_diff_blame_verbose_failures () {
   [ "$__GIT_DIFF_BLAME_VERBOSE_FAILURES" == "true" ] || (( $__GIT_DIFF_BLAME_VERBOSE_FAILURES != 0 ))
+}
+
+
+__git_diff_blame_log_warning() {
+    # Is stderr being printed into a terminal? Don't log warning if not.
+	test -t 2 && printf "$@"
 }
 
 # It would have been nice if these could be shorter, but more concise name are far more likely to clash...
@@ -23,12 +33,29 @@ __git_diff_blame_is_function() {
 if ! __git_diff_blame_is_function _git_diff; then
   if __git_diff_blame_verbose_failures; then
     { __load_completion git && is_defined_and_function _git_diff; } || {
-    # Is stderr being printed into a terminal?
-    test -t 2 && printf "Cannot find or load git's bash_completion library, completions for git-diff-blame may fail.\n" >&2; }
+      __git_diff_blame_log_warning "Cannot find or load git's bash_completion library, completions for git-diff-blame may fail.\n" >&2; }
   else
     __load_completion git
   fi
 fi
+
+# Usage: __git_diff_blame_arrays_eq NAME_of_array_1 NAME_of_array_2
+__git_diff_blame_arrays_eq() {
+	local -n arr1="$1"
+	local -n arr2="$2"
+	local arr1_len="${#arr1[@]}"
+	local arr2_len="${#arr2[@]}"
+	if (( $arr1_len != $arr2_len )); then
+	  return 2
+	fi
+	# Not using {a..b} sequence expansion as that does not support variable bounds
+	for ((i=1; i<$arr1_len; ++i)); do
+	  if [[ "${arr1[i]}" != "${arr2[i]}" ]]; then
+	    return 1
+	  fi
+	done
+	return 0
+}
 
 __git_diff_blame_count_arguments() {
     # Somewhat annoyingly for this case, __git_count_arguments resets to 0
@@ -82,8 +109,11 @@ _git_diff_blame() {
 
   # Remeber, cword is the index, so it should always be non-empty.
   # The "cword" check is so we don't start printing the warnings after a '--' for diff.
+  local words_len="${#words[@]}"
   if \
-      [[ -n "$cword" && "$cword" < 4 && -t 2 \
+      [[ \
+        "$words_len" -le "$__GIT_DIFF_BLAME_MAX_ARGS_TO_COMPARE" \
+        && -n "$cword" && "$cword" < 4 && -t 2 \
         && (x"$cur"x == 'x-x' || x"$cur"x == 'x-?x' \
         || x"$cur"x == 'x--x' || x"$cur"x == 'x--?x') \
       ]] \
@@ -92,14 +122,22 @@ _git_diff_blame() {
     then
     # Warn if argument options too early, but only if up to one letter given
     # (to avoid printing the warning too much).
-    local args_count="$(__git_diff_blame_count_arguments diff-blame)"
-    local args_get_ret=$?
-    if (( $args_get_ret == 0 && $args_count < 2 )); then
-      printf "\n%s: Warning: First two arguments to git diff-blame must be the before and after revspecs, with 'git diff' options coming after.\n" "git-diff-blame-completion" >&2
+    # But first, avoid warning again for the current set of arguments we have warned before
+    if ! __git_diff_blame_arrays_eq words __GIT_DIFF_BLAME_LAST_WORDS; then
+      # TODO This isn't quite right. We should care about whether cword is before our cutoff point, not the total number of arguments.
+      # But we would need to ask the git API to handle the leadning "command params", if any.
+      local args_count=$(( $words_len >= 6 ? 6 : "$(__git_diff_blame_count_arguments diff-blame)"))
+      local args_get_ret=$?
+      if (( $args_get_ret == 0 && $args_count < 2 )); then
+        __git_diff_blame_log_warning "\n%s: Warning: First two arguments to git diff-blame must be the before and after revspecs, with the options to 'git diff' coming after.\n" "git-diff-blame-completion" >&2
+        if (( $words_len < $__GIT_DIFF_BLAME_MAX_ARGS_TO_COMPARE )); then
+         __GIT_DIFF_BLAME_LAST_WORDS=( "${words[@]}" )
+        fi
+      fi
     fi
   fi
-  # Delegate to regular git diff
+  # Default to delegating to regular git diff
   _git_diff
 }
 
-# __git_complete_command, and this the completion for git diff-blame, should be able to find the above automatically
+# __git_complete_command, and thus the completion for git diff-blame, should be able to find the above automatically
